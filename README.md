@@ -21,6 +21,7 @@
   - [Low-Level Server](#low-level-server)
   - [Writing MCP Clients](#writing-mcp-clients)
   - [Server Capabilities](#server-capabilities)
+  - [Proxy OAuth Server](#proxy-authorization-requests-upstream)
 
 ## Overview
 
@@ -379,6 +380,68 @@ server.tool(
 
 ## Advanced Usage
 
+### Dynamic Servers
+
+If you want to offer an initial set of tools/prompts/resources, but later add additional ones based on user action or external state change, you can add/update/remove them _after_ the Server is connected. This will automatically emit the corresponding `listChanged` notificaions:
+
+```ts
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+const server = new McpServer({
+  name: "Dynamic Example",
+  version: "1.0.0"
+});
+
+const listMessageTool = server.tool(
+  "listMessages",
+  { channel: z.string() },
+  async ({ channel }) => ({
+    content: [{ type: "text", text: await listMessages(channel) }]
+  })
+);
+
+const putMessageTool = server.tool(
+  "putMessage",
+  { channel: z.string(), message: z.string() },
+  async ({ channel, message }) => ({
+    content: [{ type: "text", text: await putMessage(channel, string) }]
+  })
+);
+// Until we upgrade auth, `putMessage` is disabled (won't show up in listTools)
+putMessageTool.disable()
+
+const upgradeAuthTool = server.tool(
+  "upgradeAuth",
+  { permission: z.enum(["write', vadmin"])},
+  // Any mutations here will automatically emit `listChanged` notifications
+  async ({ permission }) => {
+    const { ok, err, previous } = await upgradeAuthAndStoreToken(permission)
+    if (!ok) return {content: [{ type: "text", text: `Error: ${err}` }]}
+
+    // If we previously had read-only access, 'putMessage' is now available
+    if (previous === "read") {
+      putMessageTool.enable()
+    }
+
+    if (permission === 'write') {
+      // If we've just upgraded to 'write' permissions, we can still call 'upgradeAuth' 
+      // but can only upgrade to 'admin'. 
+      upgradeAuthTool.update({
+        paramSchema: { permission: z.enum(["admin"]) }, // change validation rules
+      })
+    } else {
+      // If we're now an admin, we no longer have anywhere to upgrade to, so fully remove that tool
+      upgradeAuthTool.remove()
+    }
+  }
+)
+
+// Connect as normal
+const transport = new StdioServerTransport();
+await server.connect(transport);
+```
+
 ### Low-Level Server
 
 For more control, you can use the low-level Server class directly:
@@ -454,13 +517,6 @@ const client = new Client(
   {
     name: "example-client",
     version: "1.0.0"
-  },
-  {
-    capabilities: {
-      prompts: {},
-      resources: {},
-      tools: {}
-    }
   }
 );
 
@@ -470,15 +526,20 @@ await client.connect(transport);
 const prompts = await client.listPrompts();
 
 // Get a prompt
-const prompt = await client.getPrompt("example-prompt", {
-  arg1: "value"
+const prompt = await client.getPrompt({
+  name: "example-prompt",
+  arguments: {
+    arg1: "value"
+  }
 });
 
 // List resources
 const resources = await client.listResources();
 
 // Read a resource
-const resource = await client.readResource("file:///example.txt");
+const resource = await client.readResource({
+  uri: "file:///example.txt"
+});
 
 // Call a tool
 const result = await client.callTool({
@@ -488,6 +549,52 @@ const result = await client.callTool({
   }
 });
 ```
+
+### Proxy Authorization Requests Upstream
+
+You can proxy OAuth requests to an external authorization provider:
+
+```typescript
+import express from 'express';
+import { ProxyOAuthServerProvider, mcpAuthRouter } from '@modelcontextprotocol/sdk';
+
+const app = express();
+
+const proxyProvider = new ProxyOAuthServerProvider({
+    endpoints: {
+        authorizationUrl: "https://auth.external.com/oauth2/v1/authorize",
+        tokenUrl: "https://auth.external.com/oauth2/v1/token",
+        revocationUrl: "https://auth.external.com/oauth2/v1/revoke",
+    },
+    verifyAccessToken: async (token) => {
+        return {
+            token,
+            clientId: "123",
+            scopes: ["openid", "email", "profile"],
+        }
+    },
+    getClient: async (client_id) => {
+        return {
+            client_id,
+            redirect_uris: ["http://localhost:3000/callback"],
+        }
+    }
+})
+
+app.use(mcpAuthRouter({
+    provider: proxyProvider,
+    issuerUrl: new URL("http://auth.external.com"),
+    baseUrl: new URL("http://mcp.example.com"),
+    serviceDocumentationUrl: new URL("https://docs.example.com/"),
+}))
+```
+
+This setup allows you to:
+- Forward OAuth requests to an external provider
+- Add custom token validation logic
+- Manage client registrations
+- Provide custom documentation URLs
+- Maintain control over the OAuth flow while delegating to an external provider
 
 ## Documentation
 
