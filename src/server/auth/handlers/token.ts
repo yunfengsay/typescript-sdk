@@ -52,7 +52,7 @@ export function tokenHandler({ provider, rateLimit: rateLimitConfig }: TokenHand
   if (rateLimitConfig !== false) {
     router.use(rateLimit({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 50, // 50 requests per windowMs 
+      max: 50, // 50 requests per windowMs
       standardHeaders: true,
       legacyHeaders: false,
       message: new TooManyRequestsError('You have exceeded the rate limit for token requests').toResponseObject(),
